@@ -9,7 +9,7 @@ const PHASE1_DURATION = 4;   /* spiral quay 1 vòng */
 const PHASE3_DURATION = 2.5; /* hình cầu + spiral bung ra */
 const PHASE2_DURATION = 4.5; /* zoom in dần tới trước tim (chậm hơn một chút) */
 const RING_RADIUS = 6.5;    /* vòng spin; camera đứng ngoài vòng */
-const HEART_VIEW_DISTANCE = Math.max(RING_RADIUS + 3, 10) + 2; /* ngoài vòng ring, xa ra một chút */
+const HEART_VIEW_DISTANCE = Math.max(RING_RADIUS + 3, 10) + 4; /* ngoài vòng ring, đứng xa tim một xí */
 const EXPAND_SCALE = 1.5;  /* bán kính hình cầu lớn gấp x1.5 khi bung */
 /* Phase 3 kích hoạt khi camera vào trong bán kính hình cầu (không chờ hết phase 2) */
 const SPHERE_RADIUS_TRIGGER = 25;

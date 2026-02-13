@@ -33,19 +33,46 @@ export const heartPhotosConfig = {
   expansionScale: 1, /* 1 → 1.5 khi bung hình cầu (intro phase 3, EXPAND_SCALE) */
   /* Mặt trái tim hướng về camera: camera ở +Z nên mặt BOTTOM (local -Y) hướng về camera */
   heartFaceToCamera: "HEART_FACE_BOTTOM",
-  /* Ảnh “khuôn” cho hạt tim (đặt 1 ảnh trong public/photoHeart/) */
-  heartImageEnabled: true,
+  /* Ảnh trên tim: tắt = chỉ trái tim hạt sáng như spiral, không hiện ảnh */
+  heartImageEnabled: false,
   heartImageUrl: "/photoHeart/1.jpg",
   /* pixel tối dưới ngưỡng này sẽ mờ đi (0..1) — thấp hơn = ảnh hiện rõ hơn */
-  heartImageThreshold: 0.12,
-  /* 0..1: trộn màu ảnh vào hạt tim */
-  heartImageStrength: 0.95,
+  heartImageThreshold: 0.05,
+  /* 0..1: trộn màu ảnh vào hạt tim — 1.0 = rõ nét nhất */
+  heartImageStrength: 1.0,
   /* Chỉ hiện ảnh khi camera đứng trước mặt tim (và disperse đã xong) */
   heartImageOnlyWhenFacing: true,
   /* Dot threshold: càng lớn càng phải đứng chính diện (0..1) */
   heartImageFacingDot: 0.62,
   /* Tốc độ fade in/out — lớn = hiện/ẩn nhanh (khoảng 50 = gần như hiện ngay) */
   heartImageFadeSpeed: 50.0,
+  /* Chỉ một phần nhỏ giữa trái tim dùng để thể hiện ảnh (0.3–0.5 = 30–50% kích thước), tim vẫn hiện đầy đủ xung quanh */
+  heartImageScale: 0.4,
+  /* Tăng số hạt để ảnh trên tim nét hơn (càng cao càng nặng GPU) */
+  heartParticleCount: 200000,
+  /* Kích thước hạt tim (nhỏ hơn = nét hơn nhưng tối hơn) */
+  heartPointSize: 0.045,
+  /* Khi camera trước tim: ô trống hình viên nhộng (capsule ngang) — Rx = nửa chiều ngang (dài 2 đầu), Ry = nửa chiều dọc */
+  heartCenterHoleRx: 0.32,
+  heartCenterHoleRy: 0.11,
+  /* Nền chữ: màu trắng nhạt (hoặc cùng tông với hạt) */
+  heartCenterNoteBgColor: 0xffffff,
+  heartCenterNoteBgOpacity: 0.72,
+  /* Viền nền chữ (phân biệt với nền) */
+  heartCenterNoteBgOutlineColor: 0xdd88aa,
+  heartCenterNoteBgOutlineOpacity: 0.85,
+  /* Dịch nền + note xuống cho khớp ô trống (âm = xuống) */
+  heartCenterNoteOffsetY: -0.7,
+  /* Số hạt trang trí trong khoảng trống con nhộng */
+  heartCenterDotsCount: 720,
+  /* Lyrics: mảng các dòng, lần lượt cuộn lên (dòng giữa rõ, 2 dòng đầu/cuối mờ nửa chữ) */
+  heartCenterLyrics: [
+    "Thanh An iu dấu ❤",
+    "Mãi bên nhau em nhé",
+    "Yêu em nhiều lắm",
+    "Forever us",
+  ],
+  heartCenterLyricsDuration: 3.5,
 };
 
 /** Trái tim 3D có 6 hướng chuẩn (6 "mặt") — chọn mặt nào hướng về camera trong config.heartFaceToCamera */
@@ -61,7 +88,10 @@ export const HEART_FACES = {
 let scene, camera, renderer, domElement;
 let parentGroup;
 let heartGroup, photosGroup, photoRingGroup, notesGroup;
-let heartPointsObject = null;
+let heartPointsNormalObject = null;
+let heartPointsImageObject = null;
+/** Plane phủ ảnh full resolution khi hiện ảnh — ảnh rõ nét, không phụ thuộc số hạt */
+let heartImagePlaneMesh = null;
 let photoMeshes = [];
 let ringPhotoMeshes = [];
 let noteSprites = [];
@@ -84,20 +114,35 @@ let heartMapUniform = { value: null };
 let heartMapEnabledUniform = { value: 0.0 };
 let heartMapThresholdUniform = { value: heartPhotosConfig.heartImageThreshold ?? 0.18 };
 let heartMapStrengthUniform = { value: heartPhotosConfig.heartImageStrength ?? 0.95 };
+let heartMapScaleUniform = { value: heartPhotosConfig.heartImageScale ?? 0.4 };
 let heartFaceUniform = { value: (HEART_FACES[heartPhotosConfig.heartFaceToCamera] || HEART_FACES.HEART_FACE_TOP).clone() };
 /* Sau khi camera đứng trước tim: đếm ring quay 1 vòng (2π) rồi mới cho hiện ảnh photoHeart trên tim */
 let ringAngleAccumulatedAtHeart = 0;
 let ringCompletedOneLapSinceAtHeart = false;
+/* Ô trống giữa tim + note: bật khi camera ở trước tim */
+let heartCenterHoleUniform = { value: 0 };
+let heartCenterHoleRxUniform = { value: 0.24 };
+let heartCenterHoleRyUniform = { value: 0.11 };
+let heartCenterNoteSprite = null;
+let heartCenterNoteBgMesh = null;
+let heartCenterNoteBgOutline = null; /* viền nền chữ */
+let heartCenterDotsPoints = null;
+/* Lyrics cuộn: mảng dòng, index hiện tại, canvas/texture để cập nhật. Dùng time (từ update) để tính index. */
+let heartCenterLyricsLines = [];
+let heartCenterLyricsIndex = 0;
+let heartCenterLyricsTimeWhenHoleShown = null; /* time (đơn vị như tham số time) khi lần đầu showCenterHole */
+let heartCenterLyricsCanvas = null;
+let heartCenterLyricsTexture = null;
 
-function createHeartPointsGeometry() {
+function createHeartPointsGeometry(particleCount) {
   const points = [];
   const edgeFlag = [];
-  const targetCount = 30000;
+  const targetCount = Math.max(1000, particleCount ?? 30000);
   const box = 1.4;
   const heartRadius = 3.5;
   const edgeThreshold = 0.12;
   let tries = 0;
-  const maxTries = targetCount * 30;
+  const maxTries = targetCount * 50;
 
   while (points.length / 3 < targetCount && tries < maxTries) {
     tries++;
@@ -143,23 +188,29 @@ function createHeartPointsGeometry() {
 function createHeartPoints(opts) {
   const {
     timeUniform,
+    particleCount = 30000,
+    pointSize = 0.1,
+    blending = THREE.AdditiveBlending,
+    // Giữ "look" tim cũ: size hạt random rộng (0.4..0.9)
+    sizeRandBase = 0.4,
+    sizeRandRange = 0.5,
     heartImageTexture = null,
     heartImageEnabled = false,
     heartImageThreshold = 0.18,
     heartImageStrength = 0.95,
     heartFace = HEART_FACES[heartPhotosConfig.heartFaceToCamera] || HEART_FACES.HEART_FACE_TOP,
   } = opts;
-  const geom = createHeartPointsGeometry();
+  const geom = createHeartPointsGeometry(particleCount);
   geom.computeBoundingBox();
   const bb = geom.boundingBox;
   const cnt = geom.getAttribute("position").count;
   const sizes = new Float32Array(cnt);
-  for (let i = 0; i < cnt; i++) sizes[i] = Math.random() * 0.5 + 0.4;
+  for (let i = 0; i < cnt; i++) sizes[i] = Math.random() * sizeRandRange + sizeRandBase;
   geom.setAttribute("sizes", new THREE.BufferAttribute(sizes, 1));
   const mat = new THREE.PointsMaterial({
-    size: 0.1,
+    size: pointSize,
     transparent: true,
-    blending: THREE.AdditiveBlending,
+    blending,
     depthWrite: false,
     vertexColors: false,
     sizeAttenuation: true,
@@ -177,6 +228,10 @@ function createHeartPoints(opts) {
       shader.uniforms.heartMapEnabled = heartMapEnabledUniform;
       shader.uniforms.heartMapThreshold = heartMapThresholdUniform;
       shader.uniforms.heartMapStrength = heartMapStrengthUniform;
+      shader.uniforms.heartMapScale = heartMapScaleUniform;
+      shader.uniforms.heartCenterHole = heartCenterHoleUniform;
+      shader.uniforms.heartCenterHoleRx = heartCenterHoleRxUniform;
+      shader.uniforms.heartCenterHoleRy = heartCenterHoleRyUniform;
       shader.uniforms.heartFace = heartFaceUniform;
       shader.uniforms.bboxMin = { value: bb?.min ? bb.min.clone() : new THREE.Vector3(-5, -5, -5) };
       shader.uniforms.bboxMax = { value: bb?.max ? bb.max.clone() : new THREE.Vector3(5, 5, 5) };
@@ -221,21 +276,44 @@ function createHeartPoints(opts) {
         uniform float heartMapEnabled;
         uniform float heartMapThreshold;
         uniform float heartMapStrength;
+        uniform float heartMapScale;
+        uniform float heartCenterHole;
+        uniform float heartCenterHoleRx;
+        uniform float heartCenterHoleRy;
         ${shader.fragmentShader}
       `.replace(`#include <clipping_planes_fragment>`, `#include <clipping_planes_fragment>
-          float d = length(gl_PointCoord.xy - 0.5);
-          if (d > 0.5) discard;
-          float edgeGlow = 0.5 + 0.6 * vEdge;
-          
+          float segHalf = max(0.0, heartCenterHoleRx - heartCenterHoleRy);
+          float cx = clamp(vHeartUv.x - 0.5, -segHalf, segHalf);
+          float dx = (vHeartUv.x - 0.5) - cx;
+          float dy = (vHeartUv.y - 0.5);
+          float distToSeg = sqrt(dx * dx + dy * dy);
+          if (heartCenterHole > 0.5 && distToSeg < heartCenterHoleRy) discard;
           vec3 imgColor = vec3(1.0);
-          float imgMask = 1.0;
+          float imageRegion = 0.0;
           if (heartMapEnabled > 0.5) {
-            vec4 t = texture2D(heartMap, vHeartUv);
-            float lum = dot(t.rgb, vec3(0.299, 0.587, 0.114));
-            imgMask = smoothstep(heartMapThreshold, heartMapThreshold + 0.22, lum);
-            imgColor = mix(vec3(1.0), t.rgb, clamp(heartMapStrength, 0.0, 1.0));
+            float scale = max(0.01, heartMapScale);
+            vec2 uvCentered = (vHeartUv - (1.0 - scale) * 0.5) / scale;
+            vec2 uvFlipped = vec2(uvCentered.x, 1.0 - uvCentered.y);
+            float inBounds = step(0.0, uvFlipped.x) * step(uvFlipped.x, 1.0) * step(0.0, uvFlipped.y) * step(uvFlipped.y, 1.0);
+            if (inBounds > 0.5) {
+              vec4 t = texture2D(heartMap, uvFlipped);
+              // Hiển thị màu ảnh gần như nguyên bản để thấy "như thật"
+              imgColor = mix(vec3(1.0), t.rgb, clamp(heartMapStrength, 0.0, 1.0));
+              imageRegion = 1.0;
+            }
+            /* Ngoài vùng ảnh: giữ nguyên màu trái tim */
           }
-        `).replace(`vec4 diffuseColor = vec4( diffuse, opacity );`, `vec4 diffuseColor = vec4( (vColor * imgColor) * edgeGlow, smoothstep(0.5, 0.2, d) * (0.5 + 0.5 * edgeGlow) * imgMask );`);
+          // Pixel vùng ảnh: dùng "vuông" để tránh cảm giác mờ do hạt tròn
+          float d = length(gl_PointCoord.xy - 0.5);
+          if (imageRegion < 0.5 && d > 0.5) discard;
+          float edgeGlow = 0.5 + 0.6 * vEdge;
+
+          vec3 baseColor = vColor * edgeGlow;
+          vec3 finalColor = mix(baseColor, imgColor, imageRegion);
+          float heartAlpha = smoothstep(0.5, 0.2, d) * (0.5 + 0.5 * edgeGlow);
+          float imageAlpha = 1.0;
+          float finalAlpha = mix(heartAlpha, imageAlpha, imageRegion) * opacity;
+        `).replace(`vec4 diffuseColor = vec4( diffuse, opacity );`, `vec4 diffuseColor = vec4( finalColor, finalAlpha );`);
     },
   });
   return new THREE.Points(geom, mat);
@@ -347,6 +425,80 @@ function createNoteSprite(text) {
   return sprite;
 }
 
+const LYRICS_CANVAS_W = 512;
+const LYRICS_CANVAS_H = 256;
+const LYRICS_LINE_HEIGHT = 55;
+/* Font mềm Valentine: Quicksand (load từ index.html), fallback Segoe UI / sans-serif */
+const LYRICS_FONT = "600 38px \"Quicksand\", \"Segoe UI\", sans-serif";
+const LYRICS_FONT_MID = "600 50px \"Quicksand\", \"Segoe UI\", sans-serif";
+const LYRICS_FADE_OPACITY = 0.5;
+/* Màu chữ cho nền trắng: tối, tương phản tốt */
+const LYRICS_FILL = "#6b2048";
+const LYRICS_STROKE = "rgba(35, 8, 25, 0.95)";
+const LYRICS_STROKE_WIDTH = 2;
+
+/** Vẽ 3 dòng lyrics: trên/dưới mờ full chữ, giữa rõ. currentIndex = dòng đang là "giữa". */
+function drawLyricsToCanvas(canvas, lines, currentIndex) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx || !lines.length) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const n = lines.length;
+  const prevIdx = (currentIndex - 1 + n) % n;
+  const nextIdx = (currentIndex + 1) % n;
+  const cx = canvas.width / 2;
+  const gap = LYRICS_LINE_HEIGHT;
+  const yTop = canvas.height / 2 - gap;
+  const yMid = canvas.height / 2;
+  const yBot = canvas.height / 2 + gap;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.shadowColor = "rgba(0, 0, 0, 0.12)";
+  ctx.shadowBlur = 4;
+
+  function drawLine(text, y, alpha, font) {
+    ctx.font = font || LYRICS_FONT;
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = LYRICS_STROKE;
+    ctx.lineWidth = LYRICS_STROKE_WIDTH;
+    ctx.lineJoin = "round";
+    ctx.strokeText(text, cx, y);
+    ctx.fillStyle = LYRICS_FILL;
+    ctx.fillText(text, cx, y);
+  }
+
+  // Dòng trên: mờ, font nhỏ
+  drawLine(lines[prevIdx], yTop, LYRICS_FADE_OPACITY, LYRICS_FONT);
+  // Dòng giữa: rõ, font to hơn
+  drawLine(lines[currentIndex], yMid, 1, LYRICS_FONT_MID);
+  // Dòng dưới: mờ, font nhỏ
+  drawLine(lines[nextIdx], yBot, LYRICS_FADE_OPACITY, LYRICS_FONT);
+}
+
+/** Tạo sprite lyrics dùng chung 1 canvas texture; cập nhật bằng drawLyricsToCanvas + texture.needsUpdate = true. */
+function createLyricsSprite(lines) {
+  const canvas = document.createElement("canvas");
+  canvas.width = LYRICS_CANVAS_W;
+  canvas.height = LYRICS_CANVAS_H;
+  heartCenterLyricsCanvas = canvas;
+  heartCenterLyricsLines = lines.length ? [...lines] : [];
+  heartCenterLyricsIndex = 0;
+  heartCenterLyricsTimeWhenHoleShown = null;
+  drawLyricsToCanvas(canvas, heartCenterLyricsLines, 0);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  heartCenterLyricsTexture = tex;
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+  });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(4.8, 2.4, 1);
+  return sprite;
+}
+
 export function initHeartAndPhotos(opts) {
   const { scene: sc, camera: cam, renderer: ren, photoUrls = [], ringPhotoUrls = [], configOverrides = {}, parent = null } = opts;
   scene = sc;
@@ -367,27 +519,213 @@ export function initHeartAndPhotos(opts) {
   if (cfg.heartImageEnabled && cfg.heartImageUrl) {
     heartImageTexture = textureLoader.load(
       cfg.heartImageUrl,
-      () => {},
+      (tex) => {
+        tex.generateMipmaps = false;
+        const maxAniso = renderer?.capabilities?.getMaxAnisotropy?.() ?? 0;
+        tex.anisotropy = Math.min(16, maxAniso || 0);
+        tex.needsUpdate = true;
+      },
       undefined,
       (err) => console.warn("Heart image load error:", cfg.heartImageUrl, err)
     );
     heartImageTexture.minFilter = THREE.LinearFilter;
     heartImageTexture.magFilter = THREE.LinearFilter;
+    heartImageTexture.generateMipmaps = false;
+    const maxAniso = renderer?.capabilities?.getMaxAnisotropy?.() ?? 0;
+    heartImageTexture.anisotropy = Math.min(16, maxAniso || 0);
     if (heartImageTexture.colorSpace !== undefined) heartImageTexture.colorSpace = THREE.SRGBColorSpace;
   }
+
+  const addHeartImagePlane = (texture) => {
+    if (!heartGroup || !cfg.heartImageEnabled || heartImagePlaneMesh) return;
+    const scale = cfg.heartImageScale ?? 0.4;
+    const planeSize = (3.5 * 2) * scale;
+    const planeGeom = new THREE.PlaneGeometry(planeSize, planeSize);
+    const planeMat = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 1,
+      side: THREE.DoubleSide,
+      depthWrite: true,
+      depthTest: true,
+    });
+    planeMat.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "#include <map_fragment>",
+        `#include <map_fragment>
+        float dist = length(vUv - 0.5) * 2.0;
+        diffuseColor.a *= 1.0 - smoothstep(0.6, 1.0, dist);`
+      );
+    };
+    heartImagePlaneMesh = new THREE.Mesh(planeGeom, planeMat);
+    heartImagePlaneMesh.position.set(0, 0, 0.0);
+    heartImagePlaneMesh.rotation.x = -Math.PI / 2;
+    heartImagePlaneMesh.renderOrder = 10;
+    heartImagePlaneMesh.visible = false;
+    heartGroup.add(heartImagePlaneMesh);
+  };
 
   heartGroup = new THREE.Group();
   heartGroup.position.set(0, 0, 0);
   heartGroup.rotation.x = -Math.PI / 2;
-  heartPointsObject = createHeartPoints({
+  // 1) Trái tim "bình thường" (spiral đang quay): giữ nguyên style cũ
+  heartPointsNormalObject = createHeartPoints({
     timeUniform: heartTimeUniform,
+    particleCount: 30000,
+    pointSize: 0.1,
+    blending: THREE.AdditiveBlending,
+    // đúng như version cũ: hạt "lấp lánh" do random size rộng
+    sizeRandBase: 0.4,
+    sizeRandRange: 0.5,
     heartImageTexture,
-    heartImageEnabled: cfg.heartImageEnabled,
+    // không hiện ảnh ở mode bình thường
+    heartImageEnabled: false,
     heartImageThreshold: cfg.heartImageThreshold,
     heartImageStrength: cfg.heartImageStrength,
     heartFace: HEART_FACES[cfg.heartFaceToCamera] || HEART_FACES.HEART_FACE_TOP,
   });
-  heartGroup.add(heartPointsObject);
+  heartGroup.add(heartPointsNormalObject);
+
+  // 2) Trái tim "hiện ảnh": hạt chỉ hỗ trợ độ sâu (màu tim), ảnh chỉ ở plane texture
+  heartPointsImageObject = createHeartPoints({
+    timeUniform: heartTimeUniform,
+    particleCount: cfg.heartParticleCount ?? 200000,
+    pointSize: cfg.heartPointSize ?? 0.045,
+    blending: THREE.NormalBlending,
+    sizeRandBase: 0.92,
+    sizeRandRange: 0.08,
+    heartImageTexture,
+    heartImageEnabled: false,
+    heartImageThreshold: cfg.heartImageThreshold,
+    heartImageStrength: cfg.heartImageStrength,
+    heartFace: HEART_FACES[cfg.heartFaceToCamera] || HEART_FACES.HEART_FACE_TOP,
+  });
+  if (heartPointsImageObject.material) {
+    heartPointsImageObject.material.opacity = 0.35;
+    heartPointsImageObject.material.depthWrite = true;
+  }
+  heartPointsImageObject.visible = false;
+  heartGroup.add(heartPointsImageObject);
+
+  // Plane phủ ảnh full resolution — ảnh chỉ hiện ở đây, hạt chỉ làm độ sâu
+  if (cfg.heartImageEnabled && heartImageTexture) {
+    addHeartImagePlane(heartImageTexture);
+  }
+
+  // Kích thước ô trống = bbox mặt tim (giống shader) để nền + note khớp khoảng trống
+  const bb = heartPointsNormalObject.geometry.boundingBox;
+  const faceSizeX = bb.max.x - bb.min.x;
+  const faceSizeZ = bb.max.z - bb.min.z;
+  const rx = cfg.heartCenterHoleRx ?? 0.24;
+  const ry = cfg.heartCenterHoleRy ?? 0.11;
+  const holeW = 2 * rx * faceSizeX;
+  const holeH = 2 * ry * faceSizeZ;
+
+  // Nền chữ: hình viên nhộng, cùng kích thước ô trống
+  const pillShape = new THREE.Shape();
+  const prx = 1;
+  const pry = Math.min(1, ry / rx);
+  pillShape.moveTo(-prx + pry, -pry);
+  pillShape.lineTo(prx - pry, -pry);
+  pillShape.absarc(prx - pry, 0, pry, -Math.PI / 2, Math.PI / 2);
+  pillShape.lineTo(-prx + pry, pry);
+  pillShape.absarc(-prx + pry, 0, pry, Math.PI / 2, -Math.PI / 2);
+  pillShape.closePath();
+  const pillGeom = new THREE.ShapeGeometry(pillShape);
+  const bgColor = cfg.heartCenterNoteBgColor ?? 0xffffff;
+  const bgOpacity = cfg.heartCenterNoteBgOpacity ?? 0.92;
+  const pillMat = new THREE.MeshBasicMaterial({
+    color: bgColor,
+    transparent: true,
+    opacity: bgOpacity,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    depthTest: true,
+  });
+  heartCenterNoteBgMesh = new THREE.Mesh(pillGeom, pillMat);
+  const noteZ = -0.5;
+  const noteOffsetY = cfg.heartCenterNoteOffsetY ?? 0;
+  heartCenterNoteBgMesh.scale.set(rx * faceSizeX, rx * faceSizeZ, 1);
+  heartCenterNoteBgMesh.rotation.x = -Math.PI / 2;
+  heartCenterNoteBgMesh.position.set(0, noteOffsetY, noteZ);
+  heartCenterNoteBgMesh.renderOrder = 5;
+  heartCenterNoteBgMesh.visible = false;
+  heartGroup.add(heartCenterNoteBgMesh);
+
+  // Viền nền: chỉ đường viền ngoài (LineLoop từ shape), tránh vẽ cạnh tam giác bên trong
+  const outlineDivisions = 32;
+  const outlinePts = pillShape.getPoints(outlineDivisions);
+  const outlineGeom = new THREE.BufferGeometry().setFromPoints(
+    outlinePts.map((p) => new THREE.Vector3(p.x, p.y, 0))
+  );
+  const outlineColor = cfg.heartCenterNoteBgOutlineColor ?? 0xdd88aa;
+  const outlineOpacity = cfg.heartCenterNoteBgOutlineOpacity ?? 0.75;
+  const outlineMat = new THREE.LineBasicMaterial({
+    color: outlineColor,
+    transparent: true,
+    opacity: outlineOpacity,
+    depthWrite: false,
+    depthTest: true,
+  });
+  heartCenterNoteBgOutline = new THREE.LineLoop(outlineGeom, outlineMat);
+  heartCenterNoteBgOutline.scale.copy(heartCenterNoteBgMesh.scale);
+  heartCenterNoteBgOutline.rotation.copy(heartCenterNoteBgMesh.rotation);
+  heartCenterNoteBgOutline.position.copy(heartCenterNoteBgMesh.position);
+  heartCenterNoteBgOutline.renderOrder = 5.5;
+  heartCenterNoteBgOutline.visible = false;
+  heartGroup.add(heartCenterNoteBgOutline);
+
+  // Lyrics 3 dòng cuộn lên (dòng giữa rõ, 2 dòng đầu/cuối mờ nửa chữ)
+  const lyricsRaw = cfg.heartCenterLyrics;
+  const lyricsLines = Array.isArray(lyricsRaw)
+    ? lyricsRaw.filter((s) => String(s).trim()).map((s) => String(s).trim())
+    : typeof lyricsRaw === "string"
+      ? lyricsRaw.split(/\n/).map((s) => s.trim()).filter(Boolean)
+      : [cfg.heartCenterNote || "❤"];
+  const lyricsSprite = createLyricsSprite(lyricsLines.length ? lyricsLines : ["❤"]);
+  if (lyricsSprite) {
+    heartCenterNoteSprite = lyricsSprite;
+    heartCenterNoteSprite.position.set(0, noteOffsetY, noteZ);
+    heartCenterNoteSprite.scale.set(holeW, holeH, 1);
+    heartCenterNoteSprite.renderOrder = 6;
+    heartCenterNoteSprite.visible = false;
+    heartGroup.add(heartCenterNoteSprite);
+  }
+
+  // Hạt trang trí random trong khoảng trống con nhộng
+  const segHalf = Math.max(0, (rx - ry) * faceSizeX);
+  const capRadius = ry * faceSizeZ;
+  const dotsCount = Math.max(20, cfg.heartCenterDotsCount ?? 220);
+  const dotPositions = [];
+  let tries = 0;
+  while (dotPositions.length / 3 < dotsCount && tries < dotsCount * 20) {
+    tries++;
+    const qx = (Math.random() * 2 - 1) * rx * faceSizeX;
+    const qz = (Math.random() * 2 - 1) * ry * faceSizeZ;
+    const cx = Math.max(-segHalf, Math.min(segHalf, qx));
+    const dist = Math.sqrt((qx - cx) ** 2 + qz ** 2);
+    if (dist <= capRadius) {
+      dotPositions.push(qx, noteOffsetY, noteZ + qz);
+    }
+  }
+  if (dotPositions.length >= 3) {
+    const dotsGeom = new THREE.BufferGeometry();
+    dotsGeom.setAttribute("position", new THREE.Float32BufferAttribute(dotPositions, 3));
+    const dotsMat = new THREE.PointsMaterial({
+      size: 0.08,
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.7,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+    heartCenterDotsPoints = new THREE.Points(dotsGeom, dotsMat);
+    heartCenterDotsPoints.renderOrder = 4;
+    heartCenterDotsPoints.visible = false;
+    heartGroup.add(heartCenterDotsPoints);
+  }
+
   parentGroup.add(heartGroup);
 
   photosGroup = new THREE.Group();
@@ -576,6 +914,7 @@ export function updateHeartAndPhotos(dt, time, disperseProgress = 0, opts = {}) 
     heartFaceUniform.value.copy(faceLocal);
     heartMapThresholdUniform.value = cfg.heartImageThreshold ?? heartMapThresholdUniform.value;
     heartMapStrengthUniform.value = cfg.heartImageStrength ?? heartMapStrengthUniform.value;
+    heartMapScaleUniform.value = cfg.heartImageScale ?? heartMapScaleUniform.value;
 
     const disperseReady = disperseProgress > 0.85;
     const wantShow = cfg.heartImageOnlyWhenFacing ? (cameraAtHeart === true && disperseReady) : true;
@@ -588,6 +927,43 @@ export function updateHeartAndPhotos(dt, time, disperseProgress = 0, opts = {}) 
   } else {
     heartMapEnabledUniform.value = 0.0;
   }
+
+  // Chỉ áp dụng "mode ảnh nét" khi đang thật sự hiện ảnh
+  const imageActive = cfg.heartImageEnabled && heartMapEnabledUniform.value > 0.01;
+  if (heartPointsNormalObject) {
+    heartPointsNormalObject.visible = true;
+    heartPointsNormalObject.material.opacity = imageActive ? 0.45 : 1.0;
+  }
+  if (heartPointsImageObject) heartPointsImageObject.visible = imageActive;
+  if (heartImagePlaneMesh) heartImagePlaneMesh.visible = imageActive;
+
+  const holeRx = cfg.heartCenterHoleRx ?? 0.24;
+  const holeRy = cfg.heartCenterHoleRy ?? 0.11;
+  const showCenterHole = cameraAtHeart && holeRx > 0.001 && holeRy > 0.001;
+  heartCenterHoleUniform.value = showCenterHole ? 1.0 : 0.0;
+  heartCenterHoleRxUniform.value = holeRx;
+  heartCenterHoleRyUniform.value = holeRy;
+  if (heartCenterNoteBgMesh) heartCenterNoteBgMesh.visible = showCenterHole;
+  if (heartCenterNoteBgOutline) heartCenterNoteBgOutline.visible = showCenterHole;
+  if (heartCenterNoteSprite) heartCenterNoteSprite.visible = showCenterHole;
+  if (heartCenterDotsPoints) heartCenterDotsPoints.visible = showCenterHole;
+
+  // Lyrics: cuộn theo thời gian (dùng time để tránh lỗi khi dt = 0 hoặc không ổn định)
+  if (!showCenterHole) {
+    heartCenterLyricsTimeWhenHoleShown = null;
+  } else if (heartCenterLyricsLines.length > 0 && heartCenterLyricsCanvas && heartCenterLyricsTexture) {
+    if (heartCenterLyricsTimeWhenHoleShown == null) heartCenterLyricsTimeWhenHoleShown = time;
+    const timeScale = 0.5 * Math.PI; /* time = elapsed * timeScale (từ GalaxyScene: t * Math.PI, t = elapsed * 0.5) */
+    const elapsedSeconds = (time - heartCenterLyricsTimeWhenHoleShown) / timeScale;
+    const duration = cfg.heartCenterLyricsDuration ?? 3.5;
+    const newIndex = Math.floor(elapsedSeconds / duration) % heartCenterLyricsLines.length;
+    if (newIndex !== heartCenterLyricsIndex) {
+      heartCenterLyricsIndex = newIndex;
+      drawLyricsToCanvas(heartCenterLyricsCanvas, heartCenterLyricsLines, heartCenterLyricsIndex);
+      heartCenterLyricsTexture.needsUpdate = true;
+    }
+  }
+
   const expandedRMax = cfg.rMaxExpanded ?? cfg.rMax;
   const collapsedRMax = cfg.rMaxCollapsed ?? 2.5;
   currentRMax = expanded ? expandedRMax : currentRMax + (expandedRMax - currentRMax) * 0.02;
@@ -675,4 +1051,23 @@ export function disposeHeartAndPhotos() {
   focusedIndex = -1;
   ringAngleAccumulatedAtHeart = 0;
   ringCompletedOneLapSinceAtHeart = false;
+  heartPointsNormalObject = null;
+  heartPointsImageObject = null;
+  heartImagePlaneMesh = null;
+  heartCenterNoteSprite = null;
+  heartCenterNoteBgMesh = null;
+  if (heartCenterNoteBgOutline) {
+    if (heartCenterNoteBgOutline.geometry) heartCenterNoteBgOutline.geometry.dispose();
+    if (heartCenterNoteBgOutline.material) heartCenterNoteBgOutline.material.dispose();
+    heartCenterNoteBgOutline = null;
+  }
+  heartCenterDotsPoints = null;
+  if (heartCenterLyricsTexture) {
+    heartCenterLyricsTexture.dispose();
+    heartCenterLyricsTexture = null;
+  }
+  heartCenterLyricsCanvas = null;
+  heartCenterLyricsLines = [];
+  heartCenterLyricsIndex = 0;
+  heartCenterLyricsTimeWhenHoleShown = null;
 }
