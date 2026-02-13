@@ -1,0 +1,83 @@
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  overflow: hidden;
+  margin: 0;
+  /* Tránh kéo refresh / overscroll trên mobile */
+  overscroll-behavior: none;
+  touch-action: manipulation;
+}
+
+#root {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Focus nav — heartPhotos.js dùng getElementById */
+#focusNav {
+  display: none;
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  /* Safe area: tránh bị che bởi home indicator */
+  bottom: max(24px, env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+#focusNav button {
+  padding: 8px 14px;
+  min-height: 44px;
+  min-width: 44px;
+  background: rgba(180, 60, 100, 0.85);
+  color: #fff;
+  border: 1px solid rgba(255, 200, 220, 0.5);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#focusNav button:hover {
+  background: rgba(220, 80, 120, 0.95);
+}
+
+@media (max-width: 480px) {
+  #focusNav {
+    gap: 8px;
+    bottom: max(16px, env(safe-area-inset-bottom));
+  }
+  #focusNav button {
+    padding: 10px 16px;
+    font-size: 15px;
+  }
+}
+
+.canvas-wrap {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  /* Canvas full trong root (đã có safe-area padding ở #root) */
+  box-sizing: border-box;
+}
