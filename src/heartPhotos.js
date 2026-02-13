@@ -49,6 +49,10 @@ export const heartPhotosConfig = {
    * Nếu false: dùng đúng `ringPhotoSize` (ảnh nhỏ hơn, có thể hở nhẹ tùy ringRadius/ringPhotoCount).
    */
   ringPhotoAutoFit: false,
+  /** Mức mượt khi ring trượt lên/xuống về đúng Y (cao = nhanh hơn). */
+  ringYFollowSpeed: 8.0,
+  /** Mức mượt khi tim đổi hướng (slerp quaternion) khi camera tới tim/phase 4. */
+  heartFacingSlerpSpeed: 10.0,
   disperseSphereRadius: 25, /* ghi đè bởi GalaxyScene (DISPERSE_SPHERE_RADIUS), ảnh spiral phân bố đều trên mặt cầu đó */
   expansionScale: 1, /* 1 → 1.5 khi bung hình cầu (intro phase 3, EXPAND_SCALE) */
   /* Mặt trái tim hướng về camera: camera ở +Z nên mặt BOTTOM (local -Y) hướng về camera */
@@ -73,7 +77,8 @@ export const heartPhotosConfig = {
   /* Kích thước hạt tim (nhỏ hơn = nét hơn nhưng tối hơn) */
   heartPointSize: 0.045,
   /* Khi camera trước tim: ô trống hình viên nhộng (capsule ngang) — Rx = nửa chiều ngang (dài 2 đầu), Ry = nửa chiều dọc */
-  heartCenterHoleRx: 0.32,
+  // Tăng Rx để nền con nhộng dài ra 2 bên
+  heartCenterHoleRx: 0.40,
   heartCenterHoleRy: 0.11,
   /* Nền chữ: màu trắng nhạt (hoặc cùng tông với hạt) */
   heartCenterNoteBgColor: 0xffffff,
@@ -89,14 +94,20 @@ export const heartPhotosConfig = {
   heartCenterLyrics: [
     "Hôm nay ngày 14/2",
     "Anh iu bé bỏng của bé",
-    "Đã chuẩn bị phần quà này",
+    "Đã chuẩn bị món quà",
     "Để tặng cho",
-    "Em bé đáng iu nhất trần đời ạ",
-    "Anh cả",
-    // "Yêu em nhiều lắm",
-    // "Forever us",
+    "Em bé đáng iu nhất",
+    "Anh cảm ơn em bé ạ",
+    "Vì đã luôn bên anh",
+    "Luôn yêu anh",
+    "Luôn động viên anh",
+    "Anh luôn nhớ bé ạ",
+    "Anh yêu em nhiều lắm",
+    // "Mình cùng tẻn tẻn",
+    // "Tiếp bé nhá",
+    "Mời bé thưởng thức ạ",
   ],
-  heartCenterLyricsDuration: 3.5,
+  heartCenterLyricsDuration: 3.035,
   /* Gallery phase 4: ảnh phía trên tim — thời gian mỗi ảnh (giây), kích thước, khoảng cách trên tim */
   heartGalleryDuration: 2.5,
   heartGalleryScale: 9.5,
@@ -104,7 +115,7 @@ export const heartPhotosConfig = {
   /** Góc nghiêng gallery (rad): càng lớn càng nghiêng vào camera. Ví dụ 0.04 nhẹ, 0.2 rõ. */
   heartGalleryTilt: 0.04,
   /* Nội dung note trên tim khi đang phase 4 (gallery) */
-  heartCenterNotePhase4: "Anh yêu em ạ",
+  heartCenterNotePhase4: "Anh yêu em bé An",
 };
 
 /** Trái tim 3D có 6 hướng chuẩn (6 "mặt") — chọn mặt nào hướng về camera trong config.heartFaceToCamera */
@@ -527,7 +538,7 @@ const LYRICS_CANVAS_H = 256;
 const LYRICS_LINE_HEIGHT = 55;
 /* Font mềm Valentine: Quicksand (load từ index.html), fallback Segoe UI / sans-serif */
 const LYRICS_FONT = "600 38px \"Quicksand\", \"Segoe UI\", sans-serif";
-const LYRICS_FONT_MID = "600 50px \"Quicksand\", \"Segoe UI\", sans-serif";
+const LYRICS_FONT_MID = "600 45px \"Quicksand\", \"Segoe UI\", sans-serif";
 const LYRICS_FADE_OPACITY = 0.5;
 /* Màu chữ cho nền trắng: tối, tương phản tốt */
 const LYRICS_FILL = "#6b2048";
@@ -572,7 +583,7 @@ function drawLyricsToCanvas(canvas, lines, currentIndex) {
 }
 
 /** Phase 4: 1 dòng chữ giữa canvas, font to gấp 1.5 lần dòng giữa lyrics */
-const LYRICS_FONT_PHASE4 = "600 75px \"Quicksand\", \"Segoe UI\", sans-serif"; /* 50 * 1.5 = 75 */
+const LYRICS_FONT_PHASE4 = "600 55px \"Quicksand\", \"Segoe UI\", sans-serif"; /* 50 * 1.5 = 75 */
 function drawPhase4NoteToCanvas(canvas, text) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -860,26 +871,36 @@ export function initHeartAndPhotos(opts) {
   parentGroup.add(photosGroup);
   const notesList = 
   [
-    "Yêu em", 
-    "Nhớ em", 
+    "I love you 3000",
+    "Yêu em bé An", 
+    "Nhớ em bé An",
     "Luôn bên em", 
     "Forever us", 
     "Mãi bên nhau", 
-    "Trọn đời", 
+    "Trọn đời",
+    "Trọn đời bên em",
     "Cảm ơn em bé An", 
-    "Bé An là nhất", 
+    "Bé An là nhất",
+    "Bé An xink nhất trần đời", 
     "Hạnh phúc", 
     "Together", 
     "Always", 
     "My love", 
     "Thương em", 
     "Bé An", 
-    "Cục cưng", 
+    "Cục cưng",
+    "Cục cưng ơi",
     "Lê Nguyễn Thanh An", 
     "LNTA", 
     "Bé An ơi", 
-    "Thanh An iu dấu ❤", 
-    "Gửi em bé An"
+    "Thanh An iu dấu ạ", 
+    "Gửi em bé An",
+    "Ôm em bé An",
+    "Hun em bé An",
+    "Cưng nựng em bé An",
+    "Anh iu em bé An ạ",
+    "Anh thương em bé An ạ",
+    "Chụt chụt"
   ];
   const N = Math.max(1, (photoUrls || []).length);
   const M = notesList.length;
@@ -1066,14 +1087,16 @@ export function updateHeartAndPhotos(dt, time, disperseProgress = 0, opts = {}) 
   heartTimeUniform.value = time;
   /* Khi camera zoom tới tim: trái tim không xoay vòng (bù xoay parent), vẫn nhịp đập. Chỉ quả cầu lớn + ring xoay */
   heartGroup.position.set(0, 0, 0);
-  /* Tim + gallery đối diện camera khi đứng trước tim hoặc phase 4 */
+  /* Tim + gallery đối diện camera khi đứng trước tim hoặc phase 4 (làm mượt bằng slerp) */
+  const heartQuatLerp = Math.min(1, Math.max(0, dt) * (cfg.heartFacingSlerpSpeed ?? 10.0));
   if ((cameraAtHeart || showGalleryAboveHeart) && parentGroup) {
     parentGroup.updateMatrixWorld(true);
-    parentGroup.getWorldQuaternion(_tmpQuat).invert();
-    heartGroup.quaternion.copy(_heartFaceZQuat).premultiply(_tmpQuat);
+    parentGroup.getWorldQuaternion(_tmpQuat).invert(); // inverse(parentWorldQuat)
+    _tmpQuat2.copy(_heartFaceZQuat).premultiply(_tmpQuat); // desired quat
   } else {
-    heartGroup.rotation.set(-Math.PI / 2, 0, 0);
+    _tmpQuat2.setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
   }
+  heartGroup.quaternion.slerp(_tmpQuat2, heartQuatLerp);
   const pulse = 1 + cfg.pulseScaleAmt * Math.sin(time * cfg.pulseSpeed);
   heartGroup.scale.setScalar(pulse);
 
@@ -1081,7 +1104,9 @@ export function updateHeartAndPhotos(dt, time, disperseProgress = 0, opts = {}) 
   if (photoRingGroup) {
     const ringSpeed = cfg.ringSpinSpeed ?? 0.15;
     photoRingGroup.rotation.y += dt * ringSpeed;
-    photoRingGroup.position.y = ringAtHeartLevel ? (cfg.ringAtHeartY ?? -3.5) : 0;
+    const targetY = ringAtHeartLevel ? (cfg.ringAtHeartY ?? -3.5) : 0;
+    const yLerp = Math.min(1, Math.max(0, dt) * (cfg.ringYFollowSpeed ?? 8.0));
+    photoRingGroup.position.y += (targetY - photoRingGroup.position.y) * yLerp;
     photoRingGroup.scale.setScalar(1);
     /* Khi camera đã đứng trước tim: tích lũy góc ring quay; đủ 1 vòng (2π) thì đánh dấu hoàn thành */
     if (cameraAtHeart && !ringCompletedOneLapSinceAtHeart) {

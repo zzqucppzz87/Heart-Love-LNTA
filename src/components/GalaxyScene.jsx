@@ -30,7 +30,7 @@ async function probeSpiralPhotoCount() {
 }
 
 // Camera đứng xa hơn một chút khi xem spiral quay
-const cameraEndPos = new THREE.Vector3(0, 4, 22);
+const cameraEndPos = new THREE.Vector3(0, 4, 28);
 const cameraStartDistance = 280;
 const ACTIVATION_RADIUS = 10;
 const ASSEMBLE_RADIUS = 30;
@@ -364,8 +364,9 @@ export default function GalaxyScene({ containerRef, skipRef, onGalaxyVisible }) 
         const scale = 1 + (EXPAND_SCALE - 1) * ease;
         guDisperseSphereScale.value = scale;
         heartPhotosConfig.expansionScale = scale;
-        /* Zoom in từ từ tới trước tim (không nhảy), lerp mỗi frame */
-        camera.position.lerp(heartViewPos, 0.05);
+        /* Zoom in từ từ tới trước tim (không nhảy), lerp theo dt để mượt hơn */
+        const camLerp = Math.min(1, dt * 2.2);
+        camera.position.lerp(heartViewPos, camLerp);
         p.scale.setScalar(1);
         p.rotation.y = Math.PI * 2;
         disperseTarget = 1;
@@ -381,7 +382,8 @@ export default function GalaxyScene({ containerRef, skipRef, onGalaxyVisible }) 
       /* Tim + ring cùng trục đứng với camera khi đứng trước tim hoặc phase 4 (gallery) */
       p.rotation.z = (cameraAtHeart || inPhase4) ? 0 : 0.2;
 
-      const dampSpeed = disperseTarget > guDisperse.value ? 2000 : 4000;
+      // Làm mượt quá trình bung/thu (tránh nhảy cứng 1 frame do dt * 2000/4000 ~ clamp = 1)
+      const dampSpeed = disperseTarget > guDisperse.value ? 3.0 : 4.5;
       guDisperse.value += (disperseTarget - guDisperse.value) * Math.min(1, dt * dampSpeed);
       if (disperseTarget === 0 && guDisperse.value < 0.01) guDisperse.value = 0;
       /* Khi zoom tới tim: camera không xoay (up = 0,1,0 cố định). Chỉ quả cầu lớn + ring xoay */
