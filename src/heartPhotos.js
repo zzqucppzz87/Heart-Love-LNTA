@@ -15,20 +15,40 @@ export const heartPhotosConfig = {
   rMaxCollapsed: 18.0,
   thickness: 1.2,
   tPower: 1.6,
-  orbitSpeed: 16,
+  // meta.phase += dt * meta.speed * orbitSpeed, với meta.speed=0.2
+  // => omega = 0.2 * orbitSpeed. Chọn để 1 vòng = 21s: omega = 2π/21
+  orbitSpeed: 1.496, /* ~1.496: photo spiral quay 1 vòng / 21s, cùng chu kỳ spiral chính */
   focusDistance: 5,
   photoSize: 1.2,
   photoAspect: 4 / 3,
+  /**
+   * Khi bung ra và ảnh nằm trên mặt cầu (disperseProgress → 1),
+   * scale ảnh spiral sẽ nhân thêm hệ số này. 2.0 = gấp đôi.
+   */
+  photoSphereScaleMultiplier: 5.0,
+  /**
+   * Khi bung ra và note nằm trên mặt cầu (disperseProgress → 1),
+   * scale note sprite sẽ nhân thêm hệ số này. 2.0 = gấp đôi.
+   */
+  noteSphereScaleMultiplier: 2.0,
   pulseSpeed: 2.2,
   pulseScaleAmt: 0.12,
   dimmedOpacity: 0.15,
   lerpFactor: 0.08,
   focusLerpFactor: 0.1,
+  /** Số ảnh trong folder photosRing (1.jpg, 2.jpg, ...) — ring giãn cách & kích thước theo số này */
+  ringPhotoCount: 25,
   ringRadius: 5.0,
   ringAtHeartY: -3.5, /* khi camera zoom tới tim: tâm ring dịch xuống (Y) tới đáy/chóp tim; ring vẫn xoay */
   ringSpinSpeed: 0.15,
-  ringPhotoSize: 0.85,
+  /** Kích thước ảnh trên ring (đơn vị world). */
+  ringPhotoSize: 1.05,
   ringPhotoAspect: 4 / 3,
+  /**
+   * Nếu true: tự phóng to `ringPhotoSize` để vòng khép kín (không hở).
+   * Nếu false: dùng đúng `ringPhotoSize` (ảnh nhỏ hơn, có thể hở nhẹ tùy ringRadius/ringPhotoCount).
+   */
+  ringPhotoAutoFit: false,
   disperseSphereRadius: 25, /* ghi đè bởi GalaxyScene (DISPERSE_SPHERE_RADIUS), ảnh spiral phân bố đều trên mặt cầu đó */
   expansionScale: 1, /* 1 → 1.5 khi bung hình cầu (intro phase 3, EXPAND_SCALE) */
   /* Mặt trái tim hướng về camera: camera ở +Z nên mặt BOTTOM (local -Y) hướng về camera */
@@ -67,12 +87,24 @@ export const heartPhotosConfig = {
   heartCenterDotsCount: 720,
   /* Lyrics: mảng các dòng, lần lượt cuộn lên (dòng giữa rõ, 2 dòng đầu/cuối mờ nửa chữ) */
   heartCenterLyrics: [
-    "Thanh An iu dấu ❤",
-    "Mãi bên nhau em nhé",
-    "Yêu em nhiều lắm",
-    "Forever us",
+    "Hôm nay ngày 14/2",
+    "Anh iu bé bỏng của bé",
+    "Đã chuẩn bị phần quà này",
+    "Để tặng cho",
+    "Em bé đáng iu nhất trần đời ạ",
+    "Anh cả",
+    // "Yêu em nhiều lắm",
+    // "Forever us",
   ],
   heartCenterLyricsDuration: 3.5,
+  /* Gallery phase 4: ảnh phía trên tim — thời gian mỗi ảnh (giây), kích thước, khoảng cách trên tim */
+  heartGalleryDuration: 2.5,
+  heartGalleryScale: 9.5,
+  heartGalleryOffsetZ: 7.5,
+  /** Góc nghiêng gallery (rad): càng lớn càng nghiêng vào camera. Ví dụ 0.04 nhẹ, 0.2 rõ. */
+  heartGalleryTilt: 0.04,
+  /* Nội dung note trên tim khi đang phase 4 (gallery) */
+  heartCenterNotePhase4: "Anh yêu em ạ",
 };
 
 /** Trái tim 3D có 6 hướng chuẩn (6 "mặt") — chọn mặt nào hướng về camera trong config.heartFaceToCamera */
@@ -107,6 +139,14 @@ const _tmpVec3b = new THREE.Vector3();
 const _tmpVec3c = new THREE.Vector3();
 const _tmpQuat = new THREE.Quaternion();
 const _tmpQuat2 = new THREE.Quaternion();
+// ---- DEBUG helpers (gallery) ----
+let _debugPrevShowGallery = false;
+let _debugLastGalleryLogMs = 0;
+const _debugFrustum = new THREE.Frustum();
+const _debugProjScreenMat = new THREE.Matrix4();
+const _debugWorldPos = new THREE.Vector3();
+const _debugToCam = new THREE.Vector3();
+const _debugNormal = new THREE.Vector3();
 const _heartFaceZQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
 let heartTimeUniform = { value: 0 };
 // Uniforms dùng chung để có thể update theo camera mỗi frame
@@ -133,6 +173,17 @@ let heartCenterLyricsIndex = 0;
 let heartCenterLyricsTimeWhenHoleShown = null; /* time (đơn vị như tham số time) khi lần đầu showCenterHole */
 let heartCenterLyricsCanvas = null;
 let heartCenterLyricsTexture = null;
+/** true sau khi lyrics đã cuộn hết một vòng (tới dòng cuối rồi chuyển sang đầu) */
+let lyricsCompletedOneCycle = false;
+/** Gallery ảnh phía trên tim (phase 4): 1 plane lớn, cuộn từng ảnh ring */
+let heartGalleryMesh = null;
+let galleryGroup = null; /* group riêng cho gallery, con của parentGroup — không chịu nhịp tim */
+let heartGalleryIndex = 0;
+let heartGalleryElapsed = 0;
+/** Mảng texture riêng cho gallery (cùng URL ring), đảm bảo đổi ảnh theo index */
+let galleryTextureList = [];
+/** Textures ring theo index gốc (để lọc texture load OK cho gallery) */
+let ringTextureList = [];
 
 function createHeartPointsGeometry(particleCount) {
   const points = [];
@@ -402,26 +453,72 @@ function createRingPhotoPlane(texture, index, cfg) {
   return mesh;
 }
 
+const NOTE_FONT = "bold 64px \"Quicksand\", \"Segoe UI\", sans-serif";
+const NOTE_MAX_WIDTH = 480;
+const NOTE_LINE_HEIGHT = 80;
+const NOTE_PADDING = 48;
+const NOTE_BASE_W = 4.8;
+const NOTE_BASE_H = 2.4;
+
+/** Tạo note sprite: đo text, mở rộng canvas cho chữ dài, xuống dòng nếu cần. Trả về { sprite, baseW, baseH }. */
 function createNoteSprite(text) {
   const canvas = document.createElement("canvas");
-  canvas.width = 512;
-  canvas.height = 256;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.font = "bold 64px sans-serif";
+  ctx.font = NOTE_FONT;
+  const fullWidth = ctx.measureText(text).width;
+  const maxLineW = NOTE_MAX_WIDTH;
+  let lines = [];
+  if (fullWidth <= maxLineW) {
+    lines = [text];
+  } else {
+    const words = text.split(/\s+/);
+    let line = "";
+    const lineWidths = [];
+    for (const w of words) {
+      const test = line ? line + " " + w : w;
+      const m = ctx.measureText(test);
+      if (m.width <= maxLineW) line = test;
+      else {
+        if (line) {
+          lines.push(line);
+          lineWidths.push(ctx.measureText(line).width);
+        }
+        line = w;
+      }
+    }
+    if (line) {
+      lines.push(line);
+      lineWidths.push(ctx.measureText(line).width);
+    }
+  }
+  const lineCount = lines.length;
+  const maxW = Math.max(...lines.map((l) => ctx.measureText(l).width));
+  const cw = Math.min(1024, Math.ceil(maxW) + NOTE_PADDING * 2);
+  const ch = lineCount * NOTE_LINE_HEIGHT + NOTE_PADDING;
+  canvas.width = cw;
+  canvas.height = ch;
+  ctx.clearRect(0, 0, cw, ch);
+  ctx.font = NOTE_FONT;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.shadowColor = "rgba(255, 200, 255, 0.8)";
   ctx.shadowBlur = 18;
   ctx.fillStyle = "white";
-  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+  const cy = ch / 2;
+  const startY = cy - ((lineCount - 1) * NOTE_LINE_HEIGHT) / 2;
+  lines.forEach((ln, i) => {
+    ctx.fillText(ln, cw / 2, startY + i * NOTE_LINE_HEIGHT);
+  });
   const tex = new THREE.CanvasTexture(canvas);
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: true });
   const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(4.8, 2.4, 1);
+  const baseW = NOTE_BASE_W * (cw / 512);
+  const baseH = NOTE_BASE_H * (ch / 256);
+  sprite.userData.noteBaseW = baseW;
+  sprite.userData.noteBaseH = baseH;
   return sprite;
 }
 
@@ -474,6 +571,28 @@ function drawLyricsToCanvas(canvas, lines, currentIndex) {
   drawLine(lines[nextIdx], yBot, LYRICS_FADE_OPACITY, LYRICS_FONT);
 }
 
+/** Phase 4: 1 dòng chữ giữa canvas, font to gấp 1.5 lần dòng giữa lyrics */
+const LYRICS_FONT_PHASE4 = "600 75px \"Quicksand\", \"Segoe UI\", sans-serif"; /* 50 * 1.5 = 75 */
+function drawPhase4NoteToCanvas(canvas, text) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = LYRICS_FONT_PHASE4;
+  ctx.shadowColor = "rgba(0, 0, 0, 0.12)";
+  ctx.shadowBlur = 4;
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = LYRICS_STROKE;
+  ctx.lineWidth = LYRICS_STROKE_WIDTH;
+  ctx.lineJoin = "round";
+  ctx.strokeText(text, cx, cy);
+  ctx.fillStyle = LYRICS_FILL;
+  ctx.fillText(text, cx, cy);
+}
+
 /** Tạo sprite lyrics dùng chung 1 canvas texture; cập nhật bằng drawLyricsToCanvas + texture.needsUpdate = true. */
 function createLyricsSprite(lines) {
   const canvas = document.createElement("canvas");
@@ -513,6 +632,15 @@ export function initHeartAndPhotos(opts) {
   const cfg = heartPhotosConfig;
   const textureLoader = new THREE.TextureLoader();
   textureLoader.setCrossOrigin("anonymous");
+
+  const rebuildGalleryTexturesFromLoadedRing = () => {
+    // Chỉ lấy texture đã load thành công (có image) để gallery không bị "kẹt" vào texture lỗi/missing
+    galleryTextureList = (ringTextureList || []).filter((tex) => {
+      if (!tex) return false;
+      // three.js TextureLoader sẽ gán tex.image sau khi load xong
+      return !!tex.image;
+    });
+  };
 
   // Ảnh khuôn cho hạt tim (đặt 1 ảnh trong public/photoHeart/)
   let heartImageTexture = null;
@@ -730,7 +858,29 @@ export function initHeartAndPhotos(opts) {
 
   photosGroup = new THREE.Group();
   parentGroup.add(photosGroup);
-  const notesList = ["Yêu em", "Nhớ em", "Luôn bên em", "Forever us", "Mãi bên nhau", "Trọn đời", "Cảm ơn em", "Em là nhất", "Hạnh phúc", "Together", "Always", "My love", "Thương em", "Bé An", "Cục cưng Thanh An", "Chị đại Lê Nguyễn Thanh An", "Lê Nguyễn Thanh An", "LNTA", "Bé An ơi", "Thanh An iu dấu ❤", "Gửi em bé An"];
+  const notesList = 
+  [
+    "Yêu em", 
+    "Nhớ em", 
+    "Luôn bên em", 
+    "Forever us", 
+    "Mãi bên nhau", 
+    "Trọn đời", 
+    "Cảm ơn em bé An", 
+    "Bé An là nhất", 
+    "Hạnh phúc", 
+    "Together", 
+    "Always", 
+    "My love", 
+    "Thương em", 
+    "Bé An", 
+    "Cục cưng", 
+    "Lê Nguyễn Thanh An", 
+    "LNTA", 
+    "Bé An ơi", 
+    "Thanh An iu dấu ❤", 
+    "Gửi em bé An"
+  ];
   const N = Math.max(1, (photoUrls || []).length);
   const M = notesList.length;
   const totalSphere = N + M;
@@ -755,19 +905,68 @@ export function initHeartAndPhotos(opts) {
   }
 
   photoRingGroup = new THREE.Group();
-  const ringR = cfg.ringRadius ?? 6.5;
   const ringN = Math.max(1, ringPhotoUrls.length);
+  const ringR = cfg.ringRadius ?? 6.5;
+  // Kích thước ảnh ring: mặc định dùng đúng ringPhotoSize (nhỏ gọn hơn).
+  // Nếu bật autoFit: đảm bảo vòng khép kín bằng cách tăng tối thiểu theo cung giữa 2 ảnh.
+  const arcLength = ringR * (2 * Math.PI / ringN);
+  const ringPhotoBaseSize = cfg.ringPhotoSize ?? 0.55;
+  const ringPhotoSizeScaled = cfg.ringPhotoAutoFit ? Math.max(ringPhotoBaseSize, arcLength * 1.15) : ringPhotoBaseSize;
+  ringTextureList = new Array(ringN).fill(null);
   for (let i = 0; i < ringN; i++) {
     const theta = (i / ringN) * Math.PI * 2;
     const x = ringR * Math.cos(theta), z = ringR * Math.sin(theta);
-    const texture = ringPhotoUrls[i] ? textureLoader.load(ringPhotoUrls[i], undefined, undefined, (e) => console.warn("Ring photo load error:", ringPhotoUrls[i], e)) : null;
-    const mesh = createRingPhotoPlane(texture, i, cfg);
+    const url = ringPhotoUrls[i];
+    const texture = url ? textureLoader.load(
+      url,
+      (tex) => {
+        ringTextureList[i] = tex;
+        rebuildGalleryTexturesFromLoadedRing();
+      },
+      undefined,
+      (e) => {
+        // Missing file: vẫn giữ plane (màu fallback), nhưng không đưa vào gallery để tránh đứng yên 1 ảnh
+        ringTextureList[i] = null;
+        rebuildGalleryTexturesFromLoadedRing();
+        console.warn("Ring photo load error:", url, e);
+      }
+    ) : null;
+    if (texture) ringTextureList[i] = texture;
+    const mesh = createRingPhotoPlane(texture, i, { ...cfg, ringPhotoSize: ringPhotoSizeScaled });
     mesh.position.set(x, 0, z);
     mesh.lookAt(0, 0, 0);
     ringPhotoMeshes.push(mesh);
     photoRingGroup.add(mesh);
   }
   parentGroup.add(photoRingGroup);
+
+  // Gallery: chỉ dùng những texture ring load OK (có image) để đảm bảo đổi ảnh mượt
+  rebuildGalleryTexturesFromLoadedRing();
+
+  // Gallery ảnh phía trên tim (phase 4): group riêng, không nằm trong heartGroup → đứng yên, không nhịp đập
+  const galleryW = 4 / 3;
+  const galleryH = 1;
+  const galleryGeom = new THREE.PlaneGeometry(galleryW, galleryH);
+  const firstGalleryMap = galleryTextureList[0] ?? null;
+  const galleryMat = new THREE.MeshBasicMaterial({
+    map: firstGalleryMap,
+    transparent: true,
+    opacity: 1,
+    side: THREE.DoubleSide,
+    // Để gallery luôn nổi lên trước (không bị hạt/mesh khác che)
+    depthTest: false,
+    depthWrite: false,
+  });
+  heartGalleryMesh = new THREE.Mesh(galleryGeom, galleryMat);
+  const galleryScale = cfg.heartGalleryScale ?? 7;
+  heartGalleryMesh.scale.set(galleryScale, galleryScale * (galleryH / galleryW), 1);
+  // Rotation sẽ được billboard theo camera trong updateHeartAndPhotos()
+  heartGalleryMesh.rotation.set(0, 0, 0);
+  heartGalleryMesh.renderOrder = 20;
+  galleryGroup = new THREE.Group();
+  galleryGroup.add(heartGalleryMesh);
+  galleryGroup.visible = false;
+  parentGroup.add(galleryGroup);
 
   notesGroup = new THREE.Group();
   for (let i = 0; i < notesList.length; i++) {
@@ -791,14 +990,6 @@ export function initHeartAndPhotos(opts) {
   domElement.addEventListener("pointerdown", onPointerDown);
   window.addEventListener("keydown", onKeyDown);
 
-  const nav = document.getElementById("focusNav");
-  const prevBtn = document.getElementById("focusPrevBtn");
-  const nextBtn = document.getElementById("focusNextBtn");
-  const exitBtn = document.getElementById("focusExitBtn");
-  if (nav) nav.style.display = "none";
-  if (prevBtn) prevBtn.addEventListener("click", () => focusPrev());
-  if (nextBtn) nextBtn.addEventListener("click", () => focusNext());
-  if (exitBtn) exitBtn.addEventListener("click", () => exitFocusMode());
 }
 
 function getFocusTargetPosition() {
@@ -857,23 +1048,10 @@ function focusPrev() {
 }
 
 function onPointerDown(event) {
-  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
-  raycaster.layers.set(0);
-  const hits = raycaster.intersectObjects(photoMeshes, true);
-  if (hits.length > 0) {
-    const idx = hits[0].object.userData.photoIndex;
-    if (typeof idx === "number") enterFocusMode(idx);
-    return;
-  }
-  exitFocusMode();
+  /* Focus mode (prev/next/esc) đã tắt — không xử lý click ảnh */
 }
 
 function onKeyDown(event) {
-  if (event.key === "Escape") { exitFocusMode(); return; }
-  if (event.key === "ArrowRight") { focusNext(); return; }
-  if (event.key === "ArrowLeft") { focusPrev(); return; }
   if (event.key === "c" || event.key === "C") setExpanded(!expanded);
 }
 
@@ -882,10 +1060,14 @@ export function updateHeartAndPhotos(dt, time, disperseProgress = 0, opts = {}) 
   const cfg = heartPhotosConfig;
   const heartFacingCamera = opts.heartFacingCamera === true;
   const cameraAtHeart = opts.cameraAtHeart === true;
+  const showGalleryAboveHeart = opts.showGalleryAboveHeart === true;
+  const ringAtHeartLevel = opts.ringAtHeartLevel === true || cameraAtHeart || showGalleryAboveHeart;
+  const spiralRotationY = opts.spiralRotationY;
   heartTimeUniform.value = time;
   /* Khi camera zoom tới tim: trái tim không xoay vòng (bù xoay parent), vẫn nhịp đập. Chỉ quả cầu lớn + ring xoay */
   heartGroup.position.set(0, 0, 0);
-  if (cameraAtHeart && parentGroup) {
+  /* Tim + gallery đối diện camera khi đứng trước tim hoặc phase 4 */
+  if ((cameraAtHeart || showGalleryAboveHeart) && parentGroup) {
     parentGroup.updateMatrixWorld(true);
     parentGroup.getWorldQuaternion(_tmpQuat).invert();
     heartGroup.quaternion.copy(_heartFaceZQuat).premultiply(_tmpQuat);
@@ -899,7 +1081,7 @@ export function updateHeartAndPhotos(dt, time, disperseProgress = 0, opts = {}) 
   if (photoRingGroup) {
     const ringSpeed = cfg.ringSpinSpeed ?? 0.15;
     photoRingGroup.rotation.y += dt * ringSpeed;
-    photoRingGroup.position.y = cameraAtHeart ? (cfg.ringAtHeartY ?? -3.5) : 0;
+    photoRingGroup.position.y = ringAtHeartLevel ? (cfg.ringAtHeartY ?? -3.5) : 0;
     photoRingGroup.scale.setScalar(1);
     /* Khi camera đã đứng trước tim: tích lũy góc ring quay; đủ 1 vòng (2π) thì đánh dấu hoàn thành */
     if (cameraAtHeart && !ringCompletedOneLapSinceAtHeart) {
@@ -939,7 +1121,7 @@ export function updateHeartAndPhotos(dt, time, disperseProgress = 0, opts = {}) 
 
   const holeRx = cfg.heartCenterHoleRx ?? 0.24;
   const holeRy = cfg.heartCenterHoleRy ?? 0.11;
-  const showCenterHole = cameraAtHeart && holeRx > 0.001 && holeRy > 0.001;
+  const showCenterHole = (cameraAtHeart || showGalleryAboveHeart) && holeRx > 0.001 && holeRy > 0.001;
   heartCenterHoleUniform.value = showCenterHole ? 1.0 : 0.0;
   heartCenterHoleRxUniform.value = holeRx;
   heartCenterHoleRyUniform.value = holeRy;
@@ -948,19 +1130,109 @@ export function updateHeartAndPhotos(dt, time, disperseProgress = 0, opts = {}) 
   if (heartCenterNoteSprite) heartCenterNoteSprite.visible = showCenterHole;
   if (heartCenterDotsPoints) heartCenterDotsPoints.visible = showCenterHole;
 
+  // Gallery phase 4: vị trí world (0, offsetZ, 0), chính diện camera (lookAt), tự đổi ảnh theo thời gian
+  if (galleryGroup && heartGalleryMesh) {
+    galleryGroup.visible = showGalleryAboveHeart;
+    if (showGalleryAboveHeart) {
+      const galleryOffsetZ = cfg.heartGalleryOffsetZ ?? 6.5;
+      _tmpVec3.set(0, galleryOffsetZ, 0);
+      if (parentGroup) {
+        parentGroup.updateMatrixWorld(true);
+        _tmpVec3.applyMatrix4(parentGroup.matrixWorld.clone().invert());
+      }
+      galleryGroup.position.copy(_tmpVec3);
+      parentGroup.updateMatrixWorld(true);
+      // Billboard: quay đúng mặt về camera (fix facingDot âm ~ -1.0)
+      galleryGroup.lookAt(camera.position);
+      galleryGroup.rotateY(Math.PI);
+      const tilt = cfg.heartGalleryTilt ?? -0.14;
+      galleryGroup.rotateX(tilt);
+      if (galleryTextureList.length > 0) {
+        heartGalleryElapsed += dt;
+        const galleryDuration = cfg.heartGalleryDuration ?? 1.8;
+        const galleryN = galleryTextureList.length;
+        const idx = Math.floor(heartGalleryElapsed / galleryDuration) % galleryN;
+        heartGalleryIndex = idx;
+        const tex = galleryTextureList[idx] ?? galleryTextureList[0];
+        if (tex && heartGalleryMesh.material) {
+          if (heartGalleryMesh.material.map !== tex) {
+            heartGalleryMesh.material.map = tex;
+            heartGalleryMesh.material.needsUpdate = true;
+          }
+        }
+      }
+    }
+  }
+
+  // ---- DEBUG LOGS (gallery visibility / facing / textures) ----
+  try {
+    const nowMs = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+    const shouldLog =
+      showGalleryAboveHeart !== _debugPrevShowGallery ||
+      (showGalleryAboveHeart && (nowMs - _debugLastGalleryLogMs) > 1000);
+
+    if (shouldLog) {
+      _debugPrevShowGallery = showGalleryAboveHeart;
+      _debugLastGalleryLogMs = nowMs;
+
+      const loadedRingCount = (ringTextureList || []).filter((t) => !!(t && t.image)).length;
+      const galleryCount = (galleryTextureList || []).length;
+      const map = heartGalleryMesh?.material?.map ?? null;
+      const mapSrc = map?.image?.currentSrc || map?.image?.src || null;
+
+      camera?.updateMatrixWorld?.(true);
+      heartGalleryMesh.getWorldPosition(_debugWorldPos);
+      _debugToCam.copy(camera.position).sub(_debugWorldPos).normalize();
+      heartGalleryMesh.getWorldQuaternion(_tmpQuat2);
+      _debugNormal.set(0, 0, 1).applyQuaternion(_tmpQuat2).normalize();
+      const facingDot = _debugNormal.dot(_debugToCam);
+
+      _debugProjScreenMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      _debugFrustum.setFromProjectionMatrix(_debugProjScreenMat);
+      const inFrustum = _debugFrustum.containsPoint(_debugWorldPos);
+
+      console.log("[heartPhotos gallery debug]", {
+        showGalleryAboveHeart,
+        galleryGroupVisible: !!galleryGroup?.visible,
+        disperseProgress: Number(disperseProgress?.toFixed?.(3) ?? disperseProgress),
+        galleryCount,
+        loadedRingCount,
+        galleryIndex: heartGalleryIndex,
+        mapSrc,
+        galleryWorldPos: { x: _debugWorldPos.x, y: _debugWorldPos.y, z: _debugWorldPos.z },
+        cameraPos: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+        facingDot,
+        inFrustum,
+      });
+
+      if (showGalleryAboveHeart && galleryCount === 0) {
+        console.warn("[heartPhotos gallery debug] showGalleryAboveHeart=TRUE but galleryTextureList is empty. Check missing /photosRing files.");
+      }
+    }
+  } catch (e) {
+    // never break render loop because of debug
+  }
+
   // Lyrics: cuộn theo thời gian (dùng time để tránh lỗi khi dt = 0 hoặc không ổn định)
+  if (showGalleryAboveHeart && heartCenterLyricsCanvas && heartCenterLyricsTexture) {
+    const phase4Text = cfg.heartCenterNotePhase4 ?? "Anh yêu em";
+    drawPhase4NoteToCanvas(heartCenterLyricsCanvas, phase4Text);
+    heartCenterLyricsTexture.needsUpdate = true;
+  }
   if (!showCenterHole) {
     heartCenterLyricsTimeWhenHoleShown = null;
-  } else if (heartCenterLyricsLines.length > 0 && heartCenterLyricsCanvas && heartCenterLyricsTexture) {
+  } else if (!showGalleryAboveHeart && heartCenterLyricsLines.length > 0 && heartCenterLyricsCanvas && heartCenterLyricsTexture) {
     if (heartCenterLyricsTimeWhenHoleShown == null) heartCenterLyricsTimeWhenHoleShown = time;
     const timeScale = 0.5 * Math.PI; /* time = elapsed * timeScale (từ GalaxyScene: t * Math.PI, t = elapsed * 0.5) */
     const elapsedSeconds = (time - heartCenterLyricsTimeWhenHoleShown) / timeScale;
     const duration = cfg.heartCenterLyricsDuration ?? 3.5;
     const newIndex = Math.floor(elapsedSeconds / duration) % heartCenterLyricsLines.length;
     if (newIndex !== heartCenterLyricsIndex) {
+      const wasLastLine = heartCenterLyricsIndex === heartCenterLyricsLines.length - 1;
       heartCenterLyricsIndex = newIndex;
       drawLyricsToCanvas(heartCenterLyricsCanvas, heartCenterLyricsLines, heartCenterLyricsIndex);
       heartCenterLyricsTexture.needsUpdate = true;
+      if (wasLastLine && newIndex === 0 && heartCenterLyricsLines.length > 0) lyricsCompletedOneCycle = true;
     }
   }
 
@@ -970,10 +1242,26 @@ export function updateHeartAndPhotos(dt, time, disperseProgress = 0, opts = {}) 
   if (!expanded) currentRMax = currentRMax + (collapsedRMax - currentRMax) * 0.02;
   const phaseFrozen = disperseProgress > 0.5;
 
+  // Ảnh spiral: phóng to dần khi bung ra lên mặt cầu (đạt x2 ở cuối)
+  const clamp01 = (x) => Math.max(0, Math.min(1, x));
+  const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3);
+  // bắt đầu phóng to từ ~60% quá trình bung, tới 100% thì đạt multiplier
+  const growT = easeOutCubic(clamp01((disperseProgress - 0.6) / 0.4));
+  const photoMul = cfg.photoSphereScaleMultiplier ?? 1.0;
+  const photoScaleMul = 1 + growT * (photoMul - 1);
+  const noteMul = cfg.noteSphereScaleMultiplier ?? 1.0;
+  const noteScaleMul = 1 + growT * (noteMul - 1);
+  const lockToParentSpiral = typeof spiralRotationY === "number";
+
   for (let i = 0; i < photoMeshes.length; i++) {
     const mesh = photoMeshes[i];
     const meta = photoMeta[i];
-    if (!phaseFrozen) meta.phase += dt * meta.speed * cfg.orbitSpeed;
+    mesh.scale.setScalar(photoScaleMul);
+    // Giữ phân bố đều như cũ: KHÔNG ép mọi ảnh về cùng 1 góc.
+    // Khi đã có spiral chính (parentGroup = p) đang quay, khóa orbit nội bộ để ảnh xoay đồng bộ theo p.rotation.y.
+    if (!phaseFrozen && !lockToParentSpiral) {
+      meta.phase += dt * meta.speed * cfg.orbitSpeed;
+    }
     meta.basePos.copy(spiralPosition(meta.baseT, meta.armIndex, meta.phase, cfg, meta.jitterY));
     if (focusedIndex >= 0) {
       mesh.position.lerp(meta.targetPos, cfg.focusLerpFactor);
@@ -994,7 +1282,13 @@ export function updateHeartAndPhotos(dt, time, disperseProgress = 0, opts = {}) 
     for (let i = 0; i < noteSprites.length; i++) {
       const s = noteSprites[i];
       const meta = noteMeta[i];
-      if (!phaseFrozen) meta.phase += dt * meta.speed * cfg.orbitSpeed * 0.8;
+      const bw = s.userData?.noteBaseW ?? NOTE_BASE_W;
+      const bh = s.userData?.noteBaseH ?? NOTE_BASE_H;
+      s.scale.set(bw * noteScaleMul, bh * noteScaleMul, 1);
+      // Notes cũng giữ phân bố đều + xoay đồng bộ theo spiral chính (p.rotation.y) bằng cách khóa orbit nội bộ.
+      if (!phaseFrozen && !lockToParentSpiral) {
+        meta.phase += dt * meta.speed * cfg.orbitSpeed * 0.8;
+      }
       meta.basePos.copy(spiralPosition(meta.baseT, meta.armIndex, meta.phase, cfg, 0.0));
       _tmpVec3.copy(meta.chaosPos).multiplyScalar(cfg.expansionScale ?? 1);
       _tmpVec3.sub(meta.basePos).multiplyScalar(disperseProgress).add(meta.basePos);
@@ -1007,6 +1301,11 @@ export function updateHeartAndPhotos(dt, time, disperseProgress = 0, opts = {}) 
 
 export function setExpanded(value) {
   expanded = !!value;
+}
+
+/** true sau khi lyrics đã cuộn hết một vòng (tới dòng cuối rồi vòng lại). Dùng để kích hoạt phase 4 (camera lùi + gallery ảnh). */
+export function getLyricsCompletedOneCycle() {
+  return lyricsCompletedOneCycle;
 }
 
 export function disposeHeartAndPhotos() {
@@ -1056,6 +1355,14 @@ export function disposeHeartAndPhotos() {
   heartImagePlaneMesh = null;
   heartCenterNoteSprite = null;
   heartCenterNoteBgMesh = null;
+  if (galleryGroup && parentGroup) parentGroup.remove(galleryGroup);
+  galleryGroup = null;
+  galleryTextureList = [];
+  if (heartGalleryMesh) {
+    if (heartGalleryMesh.geometry) heartGalleryMesh.geometry.dispose();
+    if (heartGalleryMesh.material) heartGalleryMesh.material.dispose();
+    heartGalleryMesh = null;
+  }
   if (heartCenterNoteBgOutline) {
     if (heartCenterNoteBgOutline.geometry) heartCenterNoteBgOutline.geometry.dispose();
     if (heartCenterNoteBgOutline.material) heartCenterNoteBgOutline.material.dispose();
@@ -1070,4 +1377,5 @@ export function disposeHeartAndPhotos() {
   heartCenterLyricsLines = [];
   heartCenterLyricsIndex = 0;
   heartCenterLyricsTimeWhenHoleShown = null;
+  lyricsCompletedOneCycle = false;
 }

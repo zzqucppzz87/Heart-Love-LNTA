@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useCallback } from 'react';
 import GalaxyScene from './components/GalaxyScene';
 
 const MUSIC_SRC = '/music/noi-nay-co-anh.mp3';
@@ -9,7 +9,7 @@ export default function App() {
   const audioRef = useRef(null);
   const startedRef = useRef(false);
 
-  const tryPlayMusic = () => {
+  const tryPlayMusic = useCallback(() => {
     const el = audioRef.current;
     if (!el || startedRef.current) return;
     const p = el.play();
@@ -18,10 +18,6 @@ export default function App() {
     } else {
       startedRef.current = true;
     }
-  };
-
-  useEffect(() => {
-    tryPlayMusic();
   }, []);
 
   return (
@@ -42,30 +38,7 @@ export default function App() {
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') tryPlayMusic(); }}
         aria-label="Bấm để phát nhạc"
       />
-      <GalaxyScene containerRef={containerRef} skipRef={skipRef} />
-      {/* Focus nav — heartPhotos.js dùng getElementById để show/hide và gắn button handlers */}
-      <div
-        id="focusNav"
-        style={{
-          display: 'none',
-          position: 'fixed',
-          bottom: 24,
-          left: '50%',
-          transform: 'translateX(-50%)',
-          zIndex: 10,
-          gap: 12,
-        }}
-      >
-        <button type="button" id="focusPrevBtn" aria-label="Previous">
-          ‹ Prev
-        </button>
-        <button type="button" id="focusNextBtn" aria-label="Next">
-          Next ›
-        </button>
-        <button type="button" id="focusExitBtn" aria-label="Exit">
-          Exit (ESC)
-        </button>
-      </div>
+      <GalaxyScene containerRef={containerRef} skipRef={skipRef} onGalaxyVisible={tryPlayMusic} />
     </>
   );
 }

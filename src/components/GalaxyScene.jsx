@@ -1,23 +1,36 @@
 import React, { useRef, useEffect } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { initHeartAndPhotos, updateHeartAndPhotos, disposeHeartAndPhotos, heartPhotosConfig } from '../heartPhotos';
+import { initHeartAndPhotos, updateHeartAndPhotos, disposeHeartAndPhotos, heartPhotosConfig, getLyricsCompletedOneCycle } from '../heartPhotos';
 
 const INTRO_BLACK_RATIO = 0.1;
-const PHASE0_DURATION = 2.5; /* zoom in galaxy */
-const PHASE1_DURATION = 4;   /* spiral quay 1 vòng */
+const PHASE0_DURATION = 6;   /* zoom in galaxy — từ từ, thấy galaxy rồi mới bật nhạc */
+const PHASE1_DURATION = 21;  /* spiral quay 1 vòng (21 giây) */
 const PHASE3_DURATION = 2.5; /* hình cầu + spiral bung ra */
 const PHASE2_DURATION = 4.5; /* zoom in dần tới trước tim (chậm hơn một chút) */
 const RING_RADIUS = 6.5;    /* vòng spin; camera đứng ngoài vòng */
 const HEART_VIEW_DISTANCE = Math.max(RING_RADIUS + 3, 10) + 4; /* ngoài vòng ring, đứng xa tim một xí */
+const PHASE4_CAMERA_DURATION = 2.5; /* sau khi lyrics hết 1 vòng: camera lùi + nghiêng lên rồi mở gallery */
 const EXPAND_SCALE = 1.5;  /* bán kính hình cầu lớn gấp x1.5 khi bung */
-/* Phase 3 kích hoạt khi camera vào trong bán kính hình cầu (không chờ hết phase 2) */
-const SPHERE_RADIUS_TRIGGER = 25;
+/* Phase 3 kích hoạt khi camera vào trong bán kính hình cầu; < cameraEndPos.length() (~21.4) để phase 2 chạy mượt */
+const SPHERE_RADIUS_TRIGGER = 20;
 
-const spiralPhotoUrls = Array.from({ length: 31 }, (_, i) => `/photosSpiral/${i + 1}.jpg`);
-const ringPhotoUrls = Array.from({ length: 31 }, (_, i) => `/photosRing/${i + 1}.jpg`);
+/** Tự đếm số ảnh trong photosSpiral (1.jpg, 2.jpg, ...) bằng HEAD request đến khi 404 */
+async function probeSpiralPhotoCount() {
+  const max = 60;
+  for (let i = 1; i <= max; i++) {
+    try {
+      const r = await fetch(`/photosSpiral/${i}.jpg`, { method: 'HEAD' });
+      if (!r.ok) return i - 1;
+    } catch {
+      return i - 1;
+    }
+  }
+  return max;
+}
 
-const cameraEndPos = new THREE.Vector3(0, 4, 21);
+// Camera đứng xa hơn một chút khi xem spiral quay
+const cameraEndPos = new THREE.Vector3(0, 4, 22);
 const cameraStartDistance = 280;
 const ACTIVATION_RADIUS = 10;
 const ASSEMBLE_RADIUS = 30;
@@ -27,15 +40,35 @@ function easeOutCubic(x) {
   return 1 - Math.pow(1 - x, 3);
 }
 
-export default function GalaxyScene({ containerRef, skipRef }) {
-  const cleanupRef = useRef(null);
+export default function GalaxyScene({ containerRef, skipRef, onGalaxyVisible }) {
+  const phase1StartTimeRef = useRef(null);
   const phase3StartTimeRef = useRef(null);
+  const phase4StartTimeRef = useRef(null);
+  const galaxyVisibleFiredRef = useRef(false);
+  const debugRef = useRef({
+    phase3Logged: false,
+    introDoneLogged: false,
+    lyricsCycleLogged: false,
+    phase4StartLogged: false,
+    phase4CameraDoneLogged: false,
+  });
 
   useEffect(() => {
     const container = containerRef?.current;
     if (!container) return;
 
-    const scene = new THREE.Scene();
+    let cancelled = false;
+    let cleanupFn = null;
+
+    (async () => {
+      const spiralCount = await probeSpiralPhotoCount();
+      if (cancelled) return;
+      const ringN = Math.max(1, heartPhotosConfig.ringPhotoCount ?? 13);
+      const spiralN = Math.max(1, spiralCount || 31);
+      const ringPhotoUrls = Array.from({ length: ringN }, (_, i) => `/photosRing/${i + 1}.jpg`);
+      const spiralPhotoUrls = Array.from({ length: spiralN }, (_, i) => `/photosSpiral/${i + 1}.jpg`);
+
+      const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x160016);
 
     const width = container.clientWidth || window.innerWidth;
@@ -45,6 +78,9 @@ export default function GalaxyScene({ containerRef, skipRef }) {
     const cameraZoomStart = camera.position.clone();
     /* Camera đứng trước tim (trục +Z), nhìn tim và ring thẳng đứng không nghiêng */
     const heartViewPos = new THREE.Vector3(0, 0, HEART_VIEW_DISTANCE);
+    /* Phase 4: camera lùi ra 4 đơn vị, nghiêng lên nhìn chính diện gallery */
+    const phase4CameraPos = new THREE.Vector3(0, 0, HEART_VIEW_DISTANCE + 4);
+    const phase4TargetEnd = new THREE.Vector3(0, 3.5, 0);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -183,44 +219,127 @@ export default function GalaxyScene({ containerRef, skipRef }) {
 
     let frameId;
     const loop = () => {
-      let elapsed = clock.getElapsedTime();
+      // IMPORTANT: getElapsedTime() internally calls getDelta().
+      // If we call getElapsedTime() and then getDelta() again, dt becomes ~0 each frame.
+      // That breaks animations that rely on dt (e.g. gallery image cycling).
+      const dt = clock.getDelta();
+      let elapsed = clock.elapsedTime;
       if (skipRef?.current && phase3StartTimeRef.current == null) {
         phase3StartTimeRef.current = 0;
         elapsed = PHASE3_DURATION + 0.5;
       }
-      const dt = clock.getDelta();
-      const t = clock.getElapsedTime() * 0.5;
+      const t = elapsed * 0.5;
       gu.time.value = t * Math.PI;
       controls.target.set(0, 0, 0);
 
-      const inPhase2 = elapsed >= PHASE0_DURATION + PHASE1_DURATION && phase3StartTimeRef.current == null;
+      const phase1Start = phase1StartTimeRef.current ?? PHASE0_DURATION;
+      const phase1End = phase1Start + PHASE1_DURATION;
+      const inPhase2 = elapsed >= phase1End && phase3StartTimeRef.current == null;
       if (inPhase2 && camera.position.length() <= SPHERE_RADIUS_TRIGGER) {
         phase3StartTimeRef.current = elapsed;
       }
       const phase3Start = phase3StartTimeRef.current;
       const inPhase3 = phase3Start != null && elapsed - phase3Start < PHASE3_DURATION;
       const introDone = phase3Start != null && elapsed - phase3Start >= PHASE3_DURATION;
-      const heartFacingCamera = elapsed >= PHASE0_DURATION + PHASE1_DURATION;
+      const heartFacingCamera = elapsed >= phase1End;
       /* Khi camera zoom tới trái tim: trái tim và camera không xoay vòng; chỉ quả cầu lớn và ring xoay */
       const cameraAtHeart = heartViewPos.distanceTo(camera.position) < 0.8;
 
-      if (elapsed < PHASE0_DURATION) {
+      // ---- DEBUG LOGS (phase flow) ----
+      if (phase3Start != null && !debugRef.current.phase3Logged) {
+        debugRef.current.phase3Logged = true;
+        console.log("[GalaxyScene debug] phase3Start", { elapsed, phase3Start });
+      }
+      if (introDone && !debugRef.current.introDoneLogged) {
+        debugRef.current.introDoneLogged = true;
+        console.log("[GalaxyScene debug] introDone", { elapsed, phase3Start });
+      }
+      const lyricsDone = getLyricsCompletedOneCycle();
+      if (lyricsDone && !debugRef.current.lyricsCycleLogged) {
+        debugRef.current.lyricsCycleLogged = true;
+        console.log("[GalaxyScene debug] lyricsCompletedOneCycle -> true", { elapsed });
+      }
+
+      if (introDone && getLyricsCompletedOneCycle() && phase4StartTimeRef.current == null) {
+        phase4StartTimeRef.current = elapsed;
+      }
+      const phase4Start = phase4StartTimeRef.current;
+      const inPhase4 = phase4Start != null;
+      const phase4Elapsed = inPhase4 ? elapsed - phase4Start : 0;
+      const phase4CameraDone = phase4Elapsed >= PHASE4_CAMERA_DURATION;
+
+      if (inPhase4 && !debugRef.current.phase4StartLogged) {
+        debugRef.current.phase4StartLogged = true;
+        console.log("[GalaxyScene debug] phase4Start", { elapsed, phase4Start });
+      }
+      if (inPhase4 && phase4CameraDone && !debugRef.current.phase4CameraDoneLogged) {
+        debugRef.current.phase4CameraDoneLogged = true;
+        console.log("[GalaxyScene debug] phase4CameraDone (showGalleryAboveHeart should be TRUE)", {
+          elapsed,
+          phase4Elapsed,
+          phase4CameraDone,
+        });
+      }
+
+      if (inPhase4) {
+        /* Phase 4: chỉ camera + tim + gallery đứng yên; ring và phần khác vẫn xoay (p.rotation.y chạy) */
+        p.scale.setScalar(1);
+        guDisperseSphereScale.value = EXPAND_SCALE;
+        heartPhotosConfig.expansionScale = EXPAND_SCALE;
+        disperseTarget = 1;
+        p.rotation.y = (elapsed - phase3Start - PHASE3_DURATION) * 0.3 + Math.PI * 2;
+        p.rotation.z = 0;
+        if (!phase4CameraDone) {
+          const t = easeOutCubic(phase4Elapsed / PHASE4_CAMERA_DURATION);
+          camera.position.lerpVectors(heartViewPos, phase4CameraPos, t);
+          controls.target.lerpVectors(new THREE.Vector3(0, 0, 0), phase4TargetEnd, t);
+        } else {
+          camera.position.copy(phase4CameraPos);
+          controls.target.copy(phase4TargetEnd);
+        }
+      } else if (elapsed < PHASE0_DURATION) {
         const introT = Math.min(1, elapsed / PHASE0_DURATION);
         if (introT >= INTRO_BLACK_RATIO) {
+          if (!galaxyVisibleFiredRef.current && typeof onGalaxyVisible === 'function') {
+            galaxyVisibleFiredRef.current = true;
+            // Đánh dấu thời điểm bắt đầu Phase 1 khi galaxy bắt đầu hiện
+            phase1StartTimeRef.current = elapsed;
+            onGalaxyVisible();
+          }
           const zoomT = (introT - INTRO_BLACK_RATIO) / (1 - INTRO_BLACK_RATIO);
           const easeZoom = easeOutCubic(zoomT);
           camera.position.lerpVectors(cameraZoomStart, cameraEndPos, easeZoom);
           p.scale.setScalar(easeZoom);
+          // Bắt đầu xoay galaxy ngay khi thấy galaxy
+          if (phase1StartTimeRef.current != null) {
+            const phase1Elapsed = elapsed - phase1StartTimeRef.current;
+            const phase1T = Math.min(1, phase1Elapsed / PHASE1_DURATION);
+            p.rotation.y = phase1T * Math.PI * 2;
+          } else {
+            p.rotation.y = 0;
+          }
         } else {
           camera.position.copy(cameraZoomStart);
           p.scale.setScalar(0);
+          p.rotation.y = 0;
         }
-        p.rotation.y = 0;
         disperseTarget = 0;
         guDisperseSphereScale.value = 1;
         heartPhotosConfig.expansionScale = 1;
-      } else if (elapsed < PHASE0_DURATION + PHASE1_DURATION) {
-        const phase1T = (elapsed - PHASE0_DURATION) / PHASE1_DURATION;
+      } else if (phase1StartTimeRef.current == null) {
+        // Fallback: nếu chưa có phase1StartTime, dùng logic cũ
+        phase1StartTimeRef.current = PHASE0_DURATION;
+        const phase1T = Math.min(1, (elapsed - PHASE0_DURATION) / PHASE1_DURATION);
+        p.rotation.y = phase1T * Math.PI * 2;
+        p.scale.setScalar(1);
+        camera.position.copy(cameraEndPos);
+        disperseTarget = 0;
+        guDisperseSphereScale.value = 1;
+        heartPhotosConfig.expansionScale = 1;
+      } else if (elapsed < phase1StartTimeRef.current + PHASE1_DURATION) {
+        // Phase 1: galaxy xoay 1 vòng trong 20 giây từ khi bắt đầu thấy galaxy
+        const phase1Elapsed = elapsed - phase1StartTimeRef.current;
+        const phase1T = Math.min(1, phase1Elapsed / PHASE1_DURATION);
         p.rotation.y = phase1T * Math.PI * 2;
         p.scale.setScalar(1);
         camera.position.copy(cameraEndPos);
@@ -228,13 +347,14 @@ export default function GalaxyScene({ containerRef, skipRef }) {
         guDisperseSphereScale.value = 1;
         heartPhotosConfig.expansionScale = 1;
       } else if (phase3Start == null) {
-        /* Phase 2: zoom in từ từ tới trước tim (ease theo thời gian); phase 3 khi camera vào bán kính cầu */
-        const phase2Start = PHASE0_DURATION + PHASE1_DURATION;
+        /* Phase 2: zoom in từ từ tới trước tim (ease); phase 3 khi camera vào bán kính SPHERE_RADIUS_TRIGGER */
+        const phase2Start = phase1End;
         const phase2T = Math.min(1, (elapsed - phase2Start) / PHASE2_DURATION);
         const ease = easeOutCubic(phase2T);
         camera.position.lerpVectors(cameraEndPos, heartViewPos, ease);
         p.scale.setScalar(1);
-        p.rotation.y = Math.PI * 2;
+        const targetRotY = Math.PI * 2;
+        p.rotation.y += (targetRotY - p.rotation.y) * Math.min(1, dt * 6);
         disperseTarget = 1;
         guDisperseSphereScale.value = 1;
         heartPhotosConfig.expansionScale = 1;
@@ -258,22 +378,29 @@ export default function GalaxyScene({ containerRef, skipRef }) {
         p.rotation.y = (elapsed - phase3Start - PHASE3_DURATION) * 0.3 + Math.PI * 2;
       }
 
-      /* Khi camera zoom tới tim: quả cầu lớn + ring xoay nhưng không bị nghiêng theo trục đứng camera */
-      p.rotation.z = cameraAtHeart ? 0 : 0.2;
+      /* Tim + ring cùng trục đứng với camera khi đứng trước tim hoặc phase 4 (gallery) */
+      p.rotation.z = (cameraAtHeart || inPhase4) ? 0 : 0.2;
 
       const dampSpeed = disperseTarget > guDisperse.value ? 2000 : 4000;
       guDisperse.value += (disperseTarget - guDisperse.value) * Math.min(1, dt * dampSpeed);
       if (disperseTarget === 0 && guDisperse.value < 0.01) guDisperse.value = 0;
       /* Khi zoom tới tim: camera không xoay (up = 0,1,0 cố định). Chỉ quả cầu lớn + ring xoay */
       camera.up.set(0, 1, 0);
-      updateHeartAndPhotos(dt, t * Math.PI, guDisperse.value, { heartFacingCamera, cameraAtHeart });
+      updateHeartAndPhotos(dt, t * Math.PI, guDisperse.value, {
+        heartFacingCamera: inPhase4 ? true : heartFacingCamera,
+        cameraAtHeart: inPhase4 ? false : cameraAtHeart,
+        showGalleryAboveHeart: inPhase4 && phase4CameraDone,
+        ringAtHeartLevel: cameraAtHeart || inPhase4,
+        /* Photo spiral khóa phase = rotation spiral để quay cùng */
+        spiralRotationY: p.rotation.y,
+      });
       controls.update();
       renderer.render(scene, camera);
       frameId = requestAnimationFrame(loop);
     };
     frameId = requestAnimationFrame(loop);
 
-    cleanupRef.current = () => {
+    cleanupFn = () => {
       resizeObserver.disconnect();
       window.removeEventListener('resize', onResize);
       cancelAnimationFrame(frameId);
@@ -281,11 +408,13 @@ export default function GalaxyScene({ containerRef, skipRef }) {
       if (container && renderer.domElement) container.removeChild(renderer.domElement);
       disposeHeartAndPhotos();
     };
+    })();
 
     return () => {
-      if (cleanupRef.current) cleanupRef.current();
+      cancelled = true;
+      if (cleanupFn) cleanupFn();
     };
-  }, [containerRef, skipRef]);
+  }, [containerRef, skipRef, onGalaxyVisible]);
 
   return null;
 }
